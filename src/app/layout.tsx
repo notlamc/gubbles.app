@@ -2,6 +2,9 @@ import type { Metadata, Viewport } from "next";
 import { Fredoka, Nunito } from "next/font/google";
 import "./globals.css";
 
+// Every page is rendered per request so the proxy's CSP nonce is applied to its scripts.
+export const dynamic = "force-dynamic";
+
 const fredoka = Fredoka({ subsets: ["latin"], variable: "--font-fredoka", display: "swap" });
 const nunito = Nunito({ subsets: ["latin"], variable: "--font-nunito", display: "swap" });
 

@@ -15,6 +15,8 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // Lets the e2e suite run its own dev server alongside `npm run dev`.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   poweredByHeader: false,
   reactStrictMode: true,
   // Native / wasm modules that must be loaded by Node at runtime, never bundled.
