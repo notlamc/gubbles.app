@@ -97,7 +97,7 @@ describe("artwork generation jobs", () => {
       await fastForward(cardId);
       await processDueArtworkJobs({ cardId });
     }
-    let card = await db.card.findUniqueOrThrow({ where: { id: cardId }, include: { artworkJob: true } });
+    const card = await db.card.findUniqueOrThrow({ where: { id: cardId }, include: { artworkJob: true } });
     expect(card.artStatus).toBe("ART_FAILED");
     expect(card.artworkJob?.status).toBe("FAILED");
     expect(card.artworkJob?.lastError).toBe("stub: injected failure");
@@ -112,11 +112,11 @@ describe("artwork generation jobs", () => {
     await retryFailedArtwork(userId, cardId);
     await expect(retryFailedArtwork(userId, cardId)).rejects.toMatchObject({ code: "ARTWORK_NOT_RETRYABLE" });
     await processDueArtworkJobs({ cardId });
-    card = await db.card.findUniqueOrThrow({ where: { id: cardId }, include: { artworkJob: true, artworkEvents: true } });
-    expect(card.artStatus).toBe("ART_READY");
-    expect(card.artworkEvents.some((e) => e.kind === "MANUAL_RETRY" && e.actorId === userId)).toBe(true);
+    const repaired = await db.card.findUniqueOrThrow({ where: { id: cardId }, include: { artworkJob: true, artworkEvents: true } });
+    expect(repaired.artStatus).toBe("ART_READY");
+    expect(repaired.artworkEvents.some((e) => e.kind === "MANUAL_RETRY" && e.actorId === userId)).toBe(true);
     // Still exactly one card and one mint debit.
-    expect(await db.card.count({ where: { discoveryId: card.discoveryId } })).toBe(1);
+    expect(await db.card.count({ where: { discoveryId: repaired.discoveryId } })).toBe(1);
     expect(await db.creditLedger.count({ where: { userId, reason: "MINT" } })).toBe(1);
     expect((await db.user.findUniqueOrThrow({ where: { id: userId } })).creditBalance).toBe(balance);
     expect(await ledgerSum(userId)).toBe(balance);
