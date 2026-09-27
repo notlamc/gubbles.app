@@ -1,0 +1,259 @@
+// Gubbles POC schema.
+//
+// Portability rules (SQLite now, MySQL later — see docs/architecture.md):
+//  * No Prisma enums and no Json columns: status/purpose fields are plain strings
+//    validated by Zod/TypeScript unions in src/lib, so the same schema maps to MySQL.
+//  * Case-insensitive identity (email/username) is handled by storing a normalized
+//    copy in the application, never by relying on database collation.
+//  * Structured data (card traits) is stored relationally; the preview art spec is
+//    stored as validated, versioned serialized text.
+//  * All timestamps are UTC; "days" are explicit YYYY-MM-DD UTC strings.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique // normalized (trimmed, lower-cased)
+  username         String    @unique // normalized lower-case handle used for sign-in
+  usernameDisplay  String // as typed, for display
+  phone            String    @unique // E.164
+  passwordHash     String
+  emailConfirmedAt DateTime?
+  phoneConfirmedAt DateTime?
+  termsAcceptedAt  DateTime
+  termsVersion     String
+  displayName      String
+  publicHandle     String?   @unique // normalized; shown on public verification pages
+  ownerIsPublic    Boolean   @default(true)
+  creditBalance    Int       @default(0) // cached; CreditLedger is the source of truth
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  sessions      Session[]
+  challenges    VerificationChallenge[]
+  totp          TotpCredential?
+  recoveryCodes RecoveryCode[]
+  discoveries   Discovery[]
+  ownedCards    Card[]                  @relation("CardOwner")
+  mintedCards   Card[]                  @relation("CardMinter")
+  ledger        CreditLedger[]
+}
+
+model Session {
+  id         String    @id @default(cuid())
+  tokenHash  String    @unique // SHA-256 of the opaque cookie token
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // "ACTIVE" = fully authenticated; "MFA_PENDING" = password accepted, second factor required.
+  stage      String    @default("ACTIVE")
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  lastUsedAt DateTime  @default(now())
+  revokedAt  DateTime?
+  deviceHint String?
+
+  @@index([userId, revokedAt])
+}
+
+model VerificationChallenge {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // CONFIRM_EMAIL | CONFIRM_PHONE | CHANGE_EMAIL | CHANGE_PHONE | PASSWORD_RESET
+  purpose      String
+  channel      String // EMAIL | SMS
+  destination  String // normalized email / E.164 phone the code was sent to
+  codeHash     String
+  expiresAt    DateTime
+  attempts     Int       @default(0)
+  maxAttempts  Int
+  consumedAt   DateTime?
+  supersededAt DateTime?
+  sendCount    Int       @default(1)
+  lastSentAt   DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+
+  @@index([userId, purpose, consumedAt])
+}
+
+model TotpCredential {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  secretCipher String // AES-256-GCM ciphertext (base64url iv.tag.data)
+  keyVersion   Int
+  enabledAt    DateTime? // null until the first code is verified
+  lastUsedStep Int? // replay protection
+  createdAt    DateTime  @default(now())
+}
+
+model RecoveryCode {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String    @unique
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model RateLimitBucket {
+  key         String   @id // e.g. "login:ip:1.2.3.4"
+  windowStart DateTime
+  count       Int
+}
+
+model QrSource {
+  id          String      @id @default(cuid())
+  digest      String      @unique // HMAC-SHA256 of the normalized payload; raw payload is never stored
+  firstSeenAt DateTime    @default(now())
+  discoveries Discovery[]
+}
+
+model Discovery {
+  id                String   @id @default(cuid())
+  playerId          String
+  player            User     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  sourceId          String
+  source            QrSource @relation(fields: [sourceId], references: [id])
+  utcDay            String // YYYY-MM-DD, chosen by the server
+  locationCell      String // coarse geohash cell; exact coordinates are never stored
+  locationAccuracyM Int // client-claimed accuracy, unverified
+  rulesetId         String
+  seed              String // hex HMAC seed (immutable)
+  candidate         String // serialized, versioned card candidate (validated on read)
+  createdAt         DateTime @default(now())
+  expiresAt         DateTime
+  card              Card?
+
+  @@unique([playerId, sourceId, utcDay])
+  @@index([playerId, utcDay])
+}
+
+model Card {
+  id                   String    @id @default(cuid())
+  publicVerificationId String    @unique // random, unguessable; used in the public QR URL
+  discoveryId          String    @unique
+  discovery            Discovery @relation(fields: [discoveryId], references: [id])
+  ownerId              String
+  owner                User      @relation("CardOwner", fields: [ownerId], references: [id])
+  minterId             String
+  minter               User      @relation("CardMinter", fields: [minterId], references: [id])
+  mintedAt             DateTime  @default(now())
+  mintedUtcDay         String
+
+  // Immutable generation provenance
+  rulesetId       String
+  seed            String
+  qrDigest        String
+  locationCell    String
+  discoveryUtcDay String
+
+  // Immutable generated attributes (denormalized for filtering/indexing)
+  name      String
+  family    String
+  element   String
+  role      String
+  rarity    String
+  variant   String
+  power     Int
+  guard     Int
+  speed     Int
+  flavour   String
+  signature String
+  artSpec   String // serialized, versioned preview art spec
+  traits    CardTrait[]
+
+  // Artwork (creature illustration only)
+  artStatus        String    @default("ART_PENDING") // ART_PENDING | ART_READY | ART_FAILED
+  artPromptVersion String?
+  artPrompt        String?
+  artProvider      String?
+  artModel         String?
+  artAssetKey      String?
+  artThumbKey      String?
+  artContentHash   String?
+  artMime          String?
+  artWidth         Int?
+  artHeight        Int?
+  artGeneratedAt   DateTime?
+
+  artworkJob    ArtworkJob?
+  artworkEvents ArtworkEvent[]
+
+  @@index([ownerId, mintedAt])
+  @@index([minterId, mintedUtcDay])
+  @@index([ownerId, family])
+}
+
+model CardTrait {
+  id      String @id @default(cuid())
+  cardId  String
+  card    Card   @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  slot    Int // 0 or 1
+  traitId String // catalogue id, e.g. "bubble-dash"
+
+  @@unique([cardId, slot])
+}
+
+model ArtworkJob {
+  id          String    @id @default(cuid())
+  cardId      String    @unique
+  card        Card      @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  status      String    @default("QUEUED") // QUEUED | RUNNING | SUCCEEDED | FAILED
+  attempts    Int       @default(0)
+  maxAttempts Int
+  nextRunAt   DateTime  @default(now())
+  lockedUntil DateTime?
+  lastError   String? // private, sanitized provider error
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, nextRunAt])
+}
+
+// Audit trail for artwork generation and any repair/retry.
+model ArtworkEvent {
+  id        String   @id @default(cuid())
+  cardId    String
+  card      Card     @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  kind      String // QUEUED | ATTEMPT_FAILED | SUCCEEDED | FAILED | MANUAL_RETRY
+  detail    String?
+  actorId   String?
+  createdAt DateTime @default(now())
+
+  @@index([cardId, createdAt])
+}
+
+model CreditLedger {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  delta        Int // signed
+  balanceAfter Int
+  reason       String // SIGNUP_GRANT | MINT
+  referenceId  String // e.g. user id for grants, discovery id for mints
+  createdAt    DateTime @default(now())
+
+  @@unique([reason, referenceId])
+  @@index([userId, createdAt])
+}
+
+// Per-player, per-UTC-day counters. Guarded increments enforce daily caps
+// transactionally without relying on database-specific locking.
+model DailyUsage {
+  userId      String
+  utcDay      String
+  discoveries Int    @default(0)
+  mints       Int    @default(0)
+
+  @@id([userId, utcDay])
+}
